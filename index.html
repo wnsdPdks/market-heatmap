@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>시장 히트맵 — S&P500 · 코스피 · 코스닥</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; background:#1c2030; color:#d1d4dc; font-family:'Malgun Gothic','Segoe UI',sans-serif; overflow:hidden; }
+  #header { display:flex; align-items:center; gap:14px; padding:8px 14px; background:#141722; border-bottom:1px solid #2a2e39; height:48px; }
+  #header h1 { font-size:15px; font-weight:700; color:#fff; white-space:nowrap; }
+  .tabs { display:flex; gap:4px; }
+  .tab { padding:6px 16px; border-radius:6px; border:1px solid #2a2e39; background:transparent; color:#9aa0ae; font-size:13px; font-weight:600; cursor:pointer; }
+  .tab:hover { background:#232838; color:#d1d4dc; }
+  .tab.active { background:#2962ff; border-color:#2962ff; color:#fff; }
+  #status { margin-left:auto; display:flex; align-items:center; gap:10px; font-size:12px; color:#787b86; white-space:nowrap; }
+  #refreshBtn { padding:4px 10px; border-radius:5px; border:1px solid #2a2e39; background:#232838; color:#d1d4dc; font-size:12px; cursor:pointer; }
+  #refreshBtn:hover { background:#2e3446; }
+  #legend { display:flex; align-items:center; gap:2px; }
+  #legend span { font-size:10px; color:#787b86; padding:0 3px; }
+  #legend i { width:22px; height:12px; display:inline-block; border-radius:2px; }
+  #main { position:relative; height:calc(100% - 48px); }
+  .panel { position:absolute; inset:0; visibility:hidden; }
+  .panel.active { visibility:visible; }
+  #map-kospi, #map-kosdaq { position:absolute; inset:0; overflow:hidden; }
+  .sectorBox { position:absolute; overflow:hidden; }
+  .sectorLabel { position:absolute; left:0; top:0; width:100%; height:17px; line-height:17px; font-size:11px; font-weight:700; color:#b9bfcc; background:#262b3d; padding:0 5px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; letter-spacing:.3px; }
+  .tile { position:absolute; overflow:hidden; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; cursor:pointer; border:1px solid rgba(20,23,34,.9); border-radius:1px; transition:filter .1s; }
+  .tile:hover { filter:brightness(1.25); z-index:5; }
+  .tile .nm { font-weight:700; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.45); line-height:1.15; word-break:keep-all; }
+  .tile .pc { color:rgba(255,255,255,.92); text-shadow:0 1px 2px rgba(0,0,0,.4); line-height:1.2; }
+  #tooltip { position:fixed; z-index:99; pointer-events:none; background:#0f1220; border:1px solid #3a4157; border-radius:8px; padding:10px 12px; font-size:12px; display:none; box-shadow:0 6px 24px rgba(0,0,0,.5); min-width:170px; }
+  #tooltip .t-name { font-size:14px; font-weight:700; color:#fff; margin-bottom:2px; }
+  #tooltip .t-row { display:flex; justify-content:space-between; gap:16px; color:#9aa0ae; margin-top:3px; }
+  #tooltip .t-row b { color:#e8eaf0; font-weight:600; }
+  .loading { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:#787b86; font-size:13px; }
+  .spinner { width:28px; height:28px; border:3px solid #2a2e39; border-top-color:#2962ff; border-radius:50%; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .errmsg { color:#f6465d; font-size:12px; max-width:520px; text-align:center; line-height:1.6; }
+  .tradingview-widget-container { height:100%; width:100%; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>시장 히트맵</h1>
+  <div class="tabs">
+    <button class="tab" data-tab="spx">S&amp;P 500</button>
+    <button class="tab active" data-tab="kospi">코스피</button>
+    <button class="tab" data-tab="kosdaq">코스닥</button>
+  </div>
+  <div id="status">
+    <div id="legend"></div>
+    <span id="updated">-</span>
+    <span id="countdown"></span>
+    <button id="refreshBtn">새로고침</button>
+  </div>
+</div>
+
+<div id="main">
+  <div class="panel" id="panel-spx">
+    <!-- TradingView Stock Heatmap Widget (S&P500) -->
+    <div class="tradingview-widget-container">
+      <div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-stock-heatmap.js" async>
+      {
+        "dataSource": "SPX500",
+        "blockSize": "market_cap_basic",
+        "blockColor": "change",
+        "grouping": "sector",
+        "locale": "kr",
+        "colorTheme": "dark",
+        "hasTopBar": true,
+        "isDataSetEnabled": false,
+        "isZoomEnabled": true,
+        "hasSymbolTooltip": true,
+        "isMonoSize": false,
+        "width": "100%",
+        "height": "100%"
+      }
+      </script>
+    </div>
+  </div>
+  <div class="panel active" id="panel-kospi"><div id="map-kospi"></div><div class="loading" id="load-kospi"><div class="spinner"></div><div>코스피 데이터 불러오는 중…</div></div></div>
+  <div class="panel" id="panel-kosdaq"><div id="map-kosdaq"></div><div class="loading" id="load-kosdaq"><div class="spinner"></div><div>코스닥 데이터 불러오는 중…</div></div></div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+/* ============ 설정 ============ */
+const TOP_N_PAGES = 2;          // 시총 상위 100 x 2 = 200종목
+const REFRESH_SEC = 20;         // 자동 갱신 주기(초)
+const SECTOR_CACHE_HOURS = 24;  // 섹터 분류 캐시 시간
+
+/* 색상: finviz 스타일 (-3% 빨강 ~ 0 회색 ~ +3% 초록) */
+const C_NEG = [246,53,56], C_MID = [65,69,84], C_POS = [48,204,90];
+function lerp(a,b,t){ return a.map((v,i)=>Math.round(v+(b[i]-v)*t)); }
+function tileColor(chg){
+  const t = Math.max(-3, Math.min(3, chg)) / 3;
+  const c = t < 0 ? lerp(C_MID, C_NEG, -t) : lerp(C_MID, C_POS, t);
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+/* 섹터 한글명 */
+const SECTOR_KO = {
+  "Electronic Technology":"전자·반도체", "Technology Services":"IT서비스",
+  "Finance":"금융", "Health Technology":"제약·바이오", "Health Services":"의료서비스",
+  "Consumer Durables":"내구소비재", "Consumer Non-Durables":"필수소비재",
+  "Consumer Services":"소비자서비스", "Retail Trade":"소매·유통",
+  "Producer Manufacturing":"기계·제조", "Industrial Services":"산업서비스",
+  "Process Industries":"소재·화학", "Non-Energy Minerals":"철강·광물",
+  "Energy Minerals":"에너지", "Utilities":"유틸리티", "Transportation":"운송",
+  "Communications":"통신", "Distribution Services":"도매·상사",
+  "Commercial Services":"상업서비스", "Miscellaneous":"기타"
+};
+
+/* ============ CORS 프록시 체인 ============ */
+const PROXIES = [
+  u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+  u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+  u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+];
+let goodProxy = 0;
+async function fetchJson(url){
+  let lastErr;
+  for (let k = 0; k < PROXIES.length; k++){
+    const idx = (goodProxy + k) % PROXIES.length;
+    try {
+      const ctrl = new AbortController();
+      const tm = setTimeout(()=>ctrl.abort(), 12000);
+      const r = await fetch(PROXIES[idx](url), {signal: ctrl.signal});
+      clearTimeout(tm);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      goodProxy = idx;
+      return j;
+    } catch(e){ lastErr = e; }
+  }
+  throw lastErr || new Error('모든 프록시 실패');
+}
+
+/* ============ 섹터 분류 (TradingView scanner, 24h 캐시) ============ */
+async function getSectorMap(){
+  try {
+    const c = JSON.parse(localStorage.getItem('krSectorMap') || 'null');
+    if (c && Date.now() - c.ts < SECTOR_CACHE_HOURS*3600e3) return c.map;
+  } catch(e){}
+  try {
+    const body = {
+      filter:[{left:"type",operation:"equal",right:"stock"}],
+      options:{lang:"en"}, markets:["korea"],
+      symbols:{query:{types:[]},tickers:[]},
+      columns:["name","sector"],
+      sort:{sortBy:"market_cap_basic",sortOrder:"desc"}, range:[0,1500]
+    };
+    const r = await fetch('https://scanner.tradingview.com/korea/scan',
+      {method:'POST', body:JSON.stringify(body)});
+    const j = await r.json();
+    const map = {};
+    j.data.forEach(d => { map[d.d[0]] = d.d[1] || "Miscellaneous"; });
+    try { localStorage.setItem('krSectorMap', JSON.stringify({ts:Date.now(), map})); } catch(e){}
+    return map;
+  } catch(e){ return {}; }
+}
+
+/* ============ 네이버 실시간 시세 ============ */
+async function fetchMarket(mkt){ // 'KOSPI' | 'KOSDAQ'
+  const pages = await Promise.all(
+    Array.from({length:TOP_N_PAGES}, (_,i)=>
+      fetchJson(`https://m.stock.naver.com/api/stocks/marketValue/${mkt}?page=${i+1}&pageSize=100`))
+  );
+  const status = pages[0].stocks[0] && pages[0].stocks[0].marketStatus;
+  const stocks = pages.flatMap(p => p.stocks)
+    .filter(s => s.stockEndType === 'stock')
+    .map(s => ({
+      code:  s.itemCode,
+      name:  s.stockName,
+      price: s.closePrice,
+      chg:   parseFloat(s.fluctuationsRatio) || 0,
+      mv:    parseFloat((s.marketValue||'0').replace(/,/g,'')) || 0, // 억원
+    }))
+    .filter(s => s.mv > 0);
+  return {stocks, status};
+}
+
+/* ============ 트리맵 렌더링 ============ */
+const fmtKRW = mv => mv >= 10000 ? (mv/10000).toFixed(1).replace(/\.0$/,'') + '조원' : Math.round(mv).toLocaleString() + '억원';
+const tooltip = document.getElementById('tooltip');
+
+function render(mapId, stocks, sectorMap){
+  const el = document.getElementById(mapId);
+  const W = el.clientWidth, H = el.clientHeight;
+  if (!W || !H) return;
+  el.innerHTML = '';
+
+  const bySector = {};
+  stocks.forEach(s => {
+    const sec = SECTOR_KO[sectorMap[s.code]] || '기타';
+    (bySector[sec] = bySector[sec] || []).push(s);
+  });
+  const root = d3.hierarchy({
+    children: Object.entries(bySector).map(([name, children]) => ({name, children}))
+  })
+  .sum(d => d.mv || 0)
+  .sort((a,b) => b.value - a.value);
+
+  d3.treemap().size([W,H]).paddingInner(1)
+    .paddingTop(d => d.depth === 1 ? 18 : 0)
+    .round(true)(root);
+
+  root.children && root.children.forEach(sec => {
+    const g = document.createElement('div');
+    g.className = 'sectorBox';
+    g.style.cssText = `left:${sec.x0}px;top:${sec.y0}px;width:${sec.x1-sec.x0}px;height:${sec.y1-sec.y0}px;`;
+    const lb = document.createElement('div');
+    lb.className = 'sectorLabel';
+    lb.textContent = sec.data.name;
+    g.appendChild(lb);
+    el.appendChild(g);
+  });
+
+  root.leaves().forEach(n => {
+    const s = n.data, w = n.x1-n.x0, h = n.y1-n.y0;
+    if (w < 3 || h < 3) return;
+    const t = document.createElement('div');
+    t.className = 'tile';
+    t.style.cssText = `left:${n.x0}px;top:${n.y0}px;width:${w}px;height:${h}px;background:${tileColor(s.chg)};`;
+    const fs = Math.max(9, Math.min(w / (Math.max(s.name.length,3) * 1.05), h / 2.9, 26));
+    if (w > 34 && h > 20){
+      const nm = document.createElement('div');
+      nm.className = 'nm'; nm.style.fontSize = fs + 'px';
+      nm.textContent = s.name;
+      t.appendChild(nm);
+      if (h > fs * 2.4){
+        const pc = document.createElement('div');
+        pc.className = 'pc'; pc.style.fontSize = Math.max(8, fs * .78) + 'px';
+        pc.textContent = (s.chg > 0 ? '+' : '') + s.chg.toFixed(2) + '%';
+        t.appendChild(pc);
+      }
+    }
+    t.addEventListener('mousemove', ev => {
+      tooltip.style.display = 'block';
+      tooltip.innerHTML =
+        `<div class="t-name">${s.name} <span style="color:#787b86;font-weight:400;font-size:11px">${s.code}</span></div>
+         <div class="t-row"><span>현재가</span><b>${s.price}원</b></div>
+         <div class="t-row"><span>등락률</span><b style="color:${s.chg>0?'#30cc5a':s.chg<0?'#f6465d':'#d1d4dc'}">${(s.chg>0?'+':'')+s.chg.toFixed(2)}%</b></div>
+         <div class="t-row"><span>시가총액</span><b>${fmtKRW(s.mv)}</b></div>`;
+      const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+      tooltip.style.left = Math.min(ev.clientX + 14, innerWidth - tw - 8) + 'px';
+      tooltip.style.top  = Math.min(ev.clientY + 14, innerHeight - th - 8) + 'px';
+    });
+    t.addEventListener('mouseleave', () => tooltip.style.display = 'none');
+    t.addEventListener('click', () =>
+      window.open(`https://m.stock.naver.com/domestic/stock/${s.code}/total`, '_blank'));
+    el.appendChild(t);
+  });
+}
+
+/* ============ 상태 관리 ============ */
+const state = { active:'kospi', data:{}, sectorMap:{}, timer:null, count:REFRESH_SEC };
+const STATUS_KO = {OPEN:'장중', CLOSE:'장마감', PREOPEN:'장전', AFTER_MARKET:'시간외'};
+
+async function refresh(mkt, force){
+  if (mkt === 'spx') return;
+  const loadEl = document.getElementById('load-' + mkt);
+  try {
+    const {stocks, status} = await fetchMarket(mkt.toUpperCase());
+    state.data[mkt] = stocks;
+    loadEl.style.display = 'none';
+    render('map-' + mkt, stocks, state.sectorMap);
+    document.getElementById('updated').textContent =
+      (STATUS_KO[status] || status || '') + ' · ' + new Date().toLocaleTimeString('ko-KR') + ' 업데이트';
+  } catch(e){
+    if (!state.data[mkt])
+      loadEl.innerHTML = `<div class="errmsg">데이터를 불러오지 못했습니다.<br>${e.message}<br>잠시 후 자동으로 다시 시도합니다.</div>`;
+  }
+}
+
+function tick(){
+  if (state.active === 'spx'){ document.getElementById('countdown').textContent = ''; return; }
+  state.count--;
+  if (state.count <= 0){ state.count = REFRESH_SEC; refresh(state.active); }
+  document.getElementById('countdown').textContent = state.count + '초 후 갱신';
+}
+
+/* 탭 전환 */
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    const id = btn.dataset.tab;
+    document.getElementById('panel-' + id).classList.add('active');
+    state.active = id; state.count = REFRESH_SEC;
+    if (id === 'spx'){
+      document.getElementById('updated').textContent = 'TradingView 제공';
+    } else if (state.data[id]){
+      render('map-' + id, state.data[id], state.sectorMap);
+      refresh(id);
+    } else {
+      refresh(id);
+    }
+  });
+});
+
+document.getElementById('refreshBtn').addEventListener('click', () => {
+  state.count = REFRESH_SEC;
+  if (state.active !== 'spx') refresh(state.active);
+});
+
+let rsTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(rsTimer);
+  rsTimer = setTimeout(() => {
+    ['kospi','kosdaq'].forEach(m => state.data[m] && render('map-' + m, state.data[m], state.sectorMap));
+  }, 200);
+});
+
+/* 범례 */
+(function(){
+  const lg = document.getElementById('legend');
+  lg.innerHTML = '<span>-3%</span>' +
+    [-3,-2,-1,0,1,2,3].map(v => `<i style="background:${tileColor(v)}"></i>`).join('') +
+    '<span>+3%</span>';
+})();
+
+/* 시작 */
+(async function init(){
+  state.sectorMap = await getSectorMap();
+  await refresh('kospi');
+  refresh('kosdaq');
+  setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>
