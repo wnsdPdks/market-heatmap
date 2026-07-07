@@ -8,7 +8,7 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body { height:100%; background:#1c2030; color:#d1d4dc; font-family:'Malgun Gothic','Segoe UI',sans-serif; overflow:hidden; }
-  #header { display:flex; align-items:center; gap:14px; padding:8px 14px; background:#141722; border-bottom:1px solid #2a2e39; height:48px; }
+  #header { display:flex; align-items:center; gap:14px; padding:8px 14px; background:#141722; border-bottom:1px solid #2a2e39; height:48px; flex-wrap:nowrap; }
   #header h1 { font-size:15px; font-weight:700; color:#fff; white-space:nowrap; }
   .tabs { display:flex; gap:4px; }
   .tab { padding:6px 16px; border-radius:6px; border:1px solid #2a2e39; background:transparent; color:#9aa0ae; font-size:13px; font-weight:600; cursor:pointer; }
@@ -39,6 +39,12 @@
   @keyframes spin { to { transform:rotate(360deg); } }
   .errmsg { color:#f6465d; font-size:12px; max-width:520px; text-align:center; line-height:1.6; }
   .tradingview-widget-container { height:100%; width:100%; }
+  @media (max-width:640px){
+    #header { gap:8px; padding:6px 8px; }
+    #header h1 { display:none; }
+    #legend { display:none; }
+    .tab { padding:6px 10px; font-size:12px; }
+  }
 </style>
 </head>
 <body>
@@ -88,9 +94,8 @@
 
 <script>
 /* ============ 설정 ============ */
-const TOP_N_PAGES = 2;          // 시총 상위 100 x 2 = 200종목
-const REFRESH_SEC = 20;         // 자동 갱신 주기(초)
-const SECTOR_CACHE_HOURS = 24;  // 섹터 분류 캐시 시간
+const TOP_N = 200;        // 시총 상위 표시 종목 수
+const REFRESH_SEC = 20;   // 자동 갱신 주기(초)
 
 /* 색상: finviz 스타일 (-3% 빨강 ~ 0 회색 ~ +3% 초록) */
 const C_NEG = [246,53,56], C_MID = [65,69,84], C_POS = [48,204,90];
@@ -114,61 +119,58 @@ const SECTOR_KO = {
   "Commercial Services":"상업서비스", "Miscellaneous":"기타"
 };
 
-/* ============ CORS 프록시 체인 ============ */
+/* ============ 데이터 소스 1: TradingView scanner (지연 ~20분, 매우 안정적) ============ */
+const TV_SET = { kospi: "SYML:KRX;KOSPI", kosdaq: "SYML:KRX;KOSDAQ" };
+async function fetchTV(mkt){
+  const body = {
+    options:{lang:"ko"}, markets:["korea"],
+    symbols:{query:{types:[]}, tickers:[], symbolset:[TV_SET[mkt]]},
+    columns:["name","description","close","change","market_cap_basic","sector"],
+    sort:{sortBy:"market_cap_basic", sortOrder:"desc"}, range:[0, TOP_N]
+  };
+  const ctrl = new AbortController();
+  const tm = setTimeout(()=>ctrl.abort(), 15000);
+  const r = await fetch('https://scanner.tradingview.com/korea/scan',
+    {method:'POST', body:JSON.stringify(body), signal:ctrl.signal});
+  clearTimeout(tm);
+  if (!r.ok) throw new Error('scanner HTTP ' + r.status);
+  const j = await r.json();
+  const stocks = j.data.map(row => {
+    const d = row.d;
+    return {
+      code:  d[0],
+      name:  (d[1]||d[0]).replace(/보통주$/,''),
+      price: (d[2]!=null ? d[2].toLocaleString('ko-KR') : '-'),
+      chg:   d[3] || 0,
+      mv:    (d[4]||0) / 1e8,             // 원 → 억원
+      sector: d[5] || "Miscellaneous",
+    };
+  }).filter(s => s.mv > 0);
+  return {stocks, src:'tv'};
+}
+
+/* ============ 데이터 소스 2: 네이버 실시간 (프록시 경유, 되면 자동 적용) ============ */
 const PROXIES = [
   u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
   u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
   u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
 ];
-let goodProxy = 0;
-async function fetchJson(url){
-  let lastErr;
-  for (let k = 0; k < PROXIES.length; k++){
-    const idx = (goodProxy + k) % PROXIES.length;
-    try {
-      const ctrl = new AbortController();
-      const tm = setTimeout(()=>ctrl.abort(), 12000);
-      const r = await fetch(PROXIES[idx](url), {signal: ctrl.signal});
-      clearTimeout(tm);
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const j = await r.json();
-      goodProxy = idx;
-      return j;
-    } catch(e){ lastErr = e; }
-  }
-  throw lastErr || new Error('모든 프록시 실패');
-}
-
-/* ============ 섹터 분류 (TradingView scanner, 24h 캐시) ============ */
-async function getSectorMap(){
-  try {
-    const c = JSON.parse(localStorage.getItem('krSectorMap') || 'null');
-    if (c && Date.now() - c.ts < SECTOR_CACHE_HOURS*3600e3) return c.map;
-  } catch(e){}
-  try {
-    const body = {
-      filter:[{left:"type",operation:"equal",right:"stock"}],
-      options:{lang:"en"}, markets:["korea"],
-      symbols:{query:{types:[]},tickers:[]},
-      columns:["name","sector"],
-      sort:{sortBy:"market_cap_basic",sortOrder:"desc"}, range:[0,1500]
-    };
-    const r = await fetch('https://scanner.tradingview.com/korea/scan',
-      {method:'POST', body:JSON.stringify(body)});
+function proxyRace(url, timeout=8000){
+  return Promise.any(PROXIES.map(async p => {
+    const ctrl = new AbortController();
+    const tm = setTimeout(()=>ctrl.abort(), timeout);
+    const r = await fetch(p(url), {signal: ctrl.signal});
+    clearTimeout(tm);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    const map = {};
-    j.data.forEach(d => { map[d.d[0]] = d.d[1] || "Miscellaneous"; });
-    try { localStorage.setItem('krSectorMap', JSON.stringify({ts:Date.now(), map})); } catch(e){}
-    return map;
-  } catch(e){ return {}; }
+    if (!j || !j.stocks) throw new Error('bad payload');
+    return j;
+  }));
 }
-
-/* ============ 네이버 실시간 시세 ============ */
-async function fetchMarket(mkt){ // 'KOSPI' | 'KOSDAQ'
-  const pages = await Promise.all(
-    Array.from({length:TOP_N_PAGES}, (_,i)=>
-      fetchJson(`https://m.stock.naver.com/api/stocks/marketValue/${mkt}?page=${i+1}&pageSize=100`))
-  );
+async function fetchNaver(mkt){ // 'kospi' | 'kosdaq'
+  const M = mkt.toUpperCase();
+  const pages = await Promise.all([1,2].map(p =>
+    proxyRace(`https://m.stock.naver.com/api/stocks/marketValue/${M}?page=${p}&pageSize=100`)));
   const status = pages[0].stocks[0] && pages[0].stocks[0].marketStatus;
   const stocks = pages.flatMap(p => p.stocks)
     .filter(s => s.stockEndType === 'stock')
@@ -180,14 +182,15 @@ async function fetchMarket(mkt){ // 'KOSPI' | 'KOSDAQ'
       mv:    parseFloat((s.marketValue||'0').replace(/,/g,'')) || 0, // 억원
     }))
     .filter(s => s.mv > 0);
-  return {stocks, status};
+  return {stocks, status, src:'naver'};
 }
 
 /* ============ 트리맵 렌더링 ============ */
 const fmtKRW = mv => mv >= 10000 ? (mv/10000).toFixed(1).replace(/\.0$/,'') + '조원' : Math.round(mv).toLocaleString() + '억원';
 const tooltip = document.getElementById('tooltip');
+const isTouch = matchMedia('(hover: none)').matches;
 
-function render(mapId, stocks, sectorMap){
+function render(mapId, stocks, sectorOf){
   const el = document.getElementById(mapId);
   const W = el.clientWidth, H = el.clientHeight;
   if (!W || !H) return;
@@ -195,7 +198,7 @@ function render(mapId, stocks, sectorMap){
 
   const bySector = {};
   stocks.forEach(s => {
-    const sec = SECTOR_KO[sectorMap[s.code]] || '기타';
+    const sec = SECTOR_KO[s.sector || sectorOf[s.code]] || '기타';
     (bySector[sec] = bySector[sec] || []).push(s);
   });
   const root = d3.hierarchy({
@@ -239,6 +242,7 @@ function render(mapId, stocks, sectorMap){
       }
     }
     t.addEventListener('mousemove', ev => {
+      if (isTouch) return;
       tooltip.style.display = 'block';
       tooltip.innerHTML =
         `<div class="t-name">${s.name} <span style="color:#787b86;font-weight:400;font-size:11px">${s.code}</span></div>
@@ -257,22 +261,51 @@ function render(mapId, stocks, sectorMap){
 }
 
 /* ============ 상태 관리 ============ */
-const state = { active:'kospi', data:{}, sectorMap:{}, timer:null, count:REFRESH_SEC };
+const state = { active:'kospi', data:{}, sectorOf:{}, count:REFRESH_SEC, busy:{} };
 const STATUS_KO = {OPEN:'장중', CLOSE:'장마감', PREOPEN:'장전', AFTER_MARKET:'시간외'};
 
-async function refresh(mkt, force){
-  if (mkt === 'spx') return;
+function setUpdated(src, status){
+  const t = new Date().toLocaleTimeString('ko-KR');
+  const label = src === 'naver'
+    ? `실시간 · ${STATUS_KO[status]||''}`.trim()
+    : '약 15~20분 지연 시세';
+  document.getElementById('updated').textContent = `${label} · ${t}`;
+}
+
+async function refresh(mkt){
+  if (mkt === 'spx' || state.busy[mkt]) return;
+  state.busy[mkt] = true;
   const loadEl = document.getElementById('load-' + mkt);
+  const naverP = fetchNaver(mkt).catch(() => null);
   try {
-    const {stocks, status} = await fetchMarket(mkt.toUpperCase());
-    state.data[mkt] = stocks;
+    /* 1) TradingView scanner: 빠르고 안정적 → 즉시 표시 */
+    const tv = await fetchTV(mkt);
+    tv.stocks.forEach(s => state.sectorOf[s.code] = s.sector);
+    state.data[mkt] = tv.stocks;
     loadEl.style.display = 'none';
-    render('map-' + mkt, stocks, state.sectorMap);
-    document.getElementById('updated').textContent =
-      (STATUS_KO[status] || status || '') + ' · ' + new Date().toLocaleTimeString('ko-KR') + ' 업데이트';
+    render('map-' + mkt, tv.stocks, state.sectorOf);
+    if (state.active === mkt) setUpdated('tv');
+    /* 2) 네이버 실시간이 성공하면 덮어쓰기 */
+    const nv = await naverP;
+    if (nv && nv.stocks.length > 50){
+      state.data[mkt] = nv.stocks;
+      if (state.active === mkt || document.getElementById('map-'+mkt).childElementCount){
+        render('map-' + mkt, nv.stocks, state.sectorOf);
+      }
+      if (state.active === mkt) setUpdated('naver', nv.status);
+    }
   } catch(e){
-    if (!state.data[mkt])
+    const nv = await naverP; /* scanner 실패 시 네이버라도 */
+    if (nv){
+      state.data[mkt] = nv.stocks;
+      loadEl.style.display = 'none';
+      render('map-' + mkt, nv.stocks, state.sectorOf);
+      if (state.active === mkt) setUpdated('naver', nv.status);
+    } else if (!state.data[mkt]){
       loadEl.innerHTML = `<div class="errmsg">데이터를 불러오지 못했습니다.<br>${e.message}<br>잠시 후 자동으로 다시 시도합니다.</div>`;
+    }
+  } finally {
+    state.busy[mkt] = false;
   }
 }
 
@@ -294,10 +327,8 @@ document.querySelectorAll('.tab').forEach(btn => {
     state.active = id; state.count = REFRESH_SEC;
     if (id === 'spx'){
       document.getElementById('updated').textContent = 'TradingView 제공';
-    } else if (state.data[id]){
-      render('map-' + id, state.data[id], state.sectorMap);
-      refresh(id);
     } else {
+      if (state.data[id]) render('map-' + id, state.data[id], state.sectorOf);
       refresh(id);
     }
   });
@@ -312,7 +343,7 @@ let rsTimer;
 window.addEventListener('resize', () => {
   clearTimeout(rsTimer);
   rsTimer = setTimeout(() => {
-    ['kospi','kosdaq'].forEach(m => state.data[m] && render('map-' + m, state.data[m], state.sectorMap));
+    ['kospi','kosdaq'].forEach(m => state.data[m] && render('map-' + m, state.data[m], state.sectorOf));
   }, 200);
 });
 
@@ -326,8 +357,7 @@ window.addEventListener('resize', () => {
 
 /* 시작 */
 (async function init(){
-  state.sectorMap = await getSectorMap();
-  await refresh('kospi');
+  refresh('kospi');
   refresh('kosdaq');
   setInterval(tick, 1000);
 })();
